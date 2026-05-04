@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Casdoor Login</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.4.0/dist/protobuf.min.js"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+
+        button {
+            margin: 4px;
+            padding: 6px 12px;
+            cursor: pointer;
+        }
+
+        #status {
+            font-weight: bold;
+        }
+
+        .section {
+            margin-top: 20px;
+            padding: 12px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+        }
+
+        .coin-card {
+            margin: 8px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background-color: #f8f8f8;
+        }
+
+        .coin-symbol {
+            font-weight: bold;
+        }
+
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Casdoor Login (Token in Cookie)</h1>
+
+<p id="status">Checking login status...</p>
+
+<button onclick="login()">Login with Casdoor</button>
+<button onclick="getDetails()">Get User Info</button>
+
+<pre id="result"></pre>
+
+<div class="section">
+    <h2>Cryptocurrency Updates</h2>
+
+    <p id="wsStatus">WebSocket is not connected</p>
+
+    <button onclick="connectWebSocket()">Connect WebSocket</button>
+    <button onclick="subscribeToUpdates()">Subscribe to Updates</button>
+    <button onclick="disconnectWebSocket()">Disconnect</button>
+
+    <div id="updates">
+        <div class="coin-card" id="BTCUSDT">
+            <span class="coin-symbol">BTCUSDT:</span>
+            <span class="coin-price">waiting...</span>
+        </div>
+
+        <div class="coin-card" id="ETHUSDT">
+            <span class="coin-symbol">ETHUSDT:</span>
+            <span class="coin-price">waiting...</span>
+        </div>
+
+        <div class="coin-card" id="BNBUSDT">
+            <span class="coin-symbol">BNBUSDT:</span>
+            <span class="coin-price">waiting...</span>
+        </div>
+    </div>
+</div>
+
+<script>
+    let wasLoggedIn = localStorage.getItem("wasLoggedIn");
+
+    let ws = null;
+    let TickerUpdateType = null;
+
+    async function checkLogin() {
+        const res = await fetch("/user-info", {
+            credentials: "include"
+        });
+
+        if (res.status === 401) {
+            document.getElementById("status").textContent = "Not logged in";
+            localStorage.removeItem("wasLoggedIn");
+            return;
+        }
+
+        document.getElementById("status").textContent = "Already logged in!";
+
+        if (wasLoggedIn === "login-started") {
+            alert("Login successful!");
+            localStorage.setItem("wasLoggedIn", "true");
+        }
+    }
+
+    function login() {
+        localStorage.setItem("wasLoggedIn", "login-started");
+        window.location.href = "/login";
+    }
+
+    async function getDetails() {
+        const userRes = await fetch("/user-info", {
+            credentials: "include"
+        });
+
+        if (userRes.status === 401) {
+            document.getElementById("result").textContent =
+                "401 Unauthorized\nJWT token is missing, expired or has invalid signature.";
+            return;
+        }
+
+        const response = await userRes.json();
+
+        const user = response.claims || response;
+
+        const result = {
+            validation: response.jwtValidation || "JWT signature was validated locally on backend",
+            tokenSource: response.tokenSource || "access_token from cookie",
+            algorithm: response.algorithm || "RS256",
+            userId: user.sub || user.id || "unknown",
+            username: user.name || user.preferred_username || "unknown",
+            email: user.email || "not provided",
+            issuer: user.iss || "unknown",
+            audience: user.aud || "unknown",
+            expiresAt: user.exp || "unknown"
+        };
+
+        document.getElementById("result").textContent =
+            JSON.stringify(result, null, 2);
+    }
+
+    function getCookie(name) {
+        const cookies = document.cookie.split(";");
+
+        for (const cookie of cookies) {
+            const parts = cookie.trim().split("=");
+
+            if (parts[0] === name) {
+                return decodeURIComponent(parts[1]);
+            }
+        }
+
+        return null;
+    }
+
+    async function loadProto() {
+        if (TickerUpdateType !== null) {
+            return;
+        }
+
+        const root = await protobuf.load("/proto/ticker_update.proto");
+
+        TickerUpdateType = root.lookupType("ticker.TickerUpdate");
+    }
+
+    async function connectWebSocket() {
+        const token = getCookie("access_token");
+
+        if (!token) {
+            alert("Please login first");
+            return;
+        }
+
+        await loadProto();
+
+        if (ws !== null && ws.readyState === WebSocket.OPEN) {
+            alert("WebSocket is already connected");
+            return;
+        }
+
+        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+        const websocketUrl = protocol + "://" + window.location.host + "/coins?token=" + encodeURIComponent(token);
+
+        ws = new WebSocket(websocketUrl);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = function () {
+            console.log("Connected to WebSocket");
+            document.getElementById("wsStatus").textContent = "Connected to WebSocket";
+        };
+
+        ws.onmessage = function (event) {
+            try {
+                const bytes = new Uint8Array(event.data);
+
+                const decodedMessage = TickerUpdateType.decode(bytes);
+
+                const update = TickerUpdateType.toObject(decodedMessage, {
+                    longs: String,
+                    enums: String,
+                    bytes: String
+                });
+
+                console.log("Decoded Protobuf message:", update);
+
+                displayUpdate(update);
+
+            } catch (error) {
+                console.error("Cannot decode Protobuf message", error);
+            }
+        };
+
+        ws.onerror = function (event) {
+            console.error("WebSocket error:", event);
+            document.getElementById("wsStatus").textContent = "WebSocket error";
+        };
+
+        ws.onclose = function () {
+            console.log("WebSocket closed");
+            document.getElementById("wsStatus").textContent = "WebSocket disconnected";
+        };
+    }
+
+    function subscribeToUpdates() {
+        if (ws === null || ws.readyState !== WebSocket.OPEN) {
+            alert("Connect WebSocket first");
+            return;
+        }
+
+        const subscription = {
+            type: "subscribe",
+            symbols: ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+        };
+
+        ws.send(JSON.stringify(subscription));
+
+        document.getElementById("wsStatus").textContent =
+            "Subscribed to BTCUSDT, ETHUSDT, BNBUSDT";
+    }
+
+    function disconnectWebSocket() {
+        if (ws !== null) {
+            ws.close();
+            ws = null;
+        }
+
+        document.getElementById("wsStatus").textContent = "WebSocket disconnected";
+    }
+
+    function displayUpdate(update) {
+        const symbol = update.symbol;
+        const price = update.price;
+        const eventTime = update.eventTime || update.event_time;
+
+        const card = document.getElementById(symbol);
+
+        if (!card) {
+            return;
+        }
+
+        const date = eventTime
+            ? new Date(Number(eventTime)).toLocaleTimeString()
+            : new Date().toLocaleTimeString();
+
+        card.querySelector(".coin-price").textContent =
+            "$" + price + " (" + date + ")";
+    }
+
+    checkLogin();
+</script>
+
+</body>
+</html>
